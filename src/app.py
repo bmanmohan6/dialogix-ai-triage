@@ -2,6 +2,8 @@ import re
 from datetime import datetime, timezone
 import boto3
 import requests
+import io
+import zipfile
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from typing import List
@@ -70,21 +72,35 @@ def process_ticket_attachments(ticket_id: int, attachments: List[Attachment]):
         file_name = attachment.name
         file_url = attachment.attachment_url
         
-        # Create the virtual folder structure: "ticket_id/filename.ext"
-        s3_key = f"{ticket_id}/{file_name}"
-        
         print(f"[BACKGROUND] Downloading {file_name} from Freshdesk...")
         try:
-            # Download the file as a stream so we don't overwhelm the server's RAM
-            response = requests.get(file_url, stream=True)
+            # Download the file into memory
+            response = requests.get(file_url)
             response.raise_for_status() 
             
-            print(f"[BACKGROUND] Uploading to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
-            
-            # Stream the raw file data directly into your AWS S3 bucket
-            s3_client.upload_fileobj(response.raw, S3_BUCKET_NAME, s3_key)
-            
-            print(f"[BACKGROUND] SUCCESS! {file_name} securely vaulted in S3.")
+            # Check if the file is a zip archive
+            if file_name.endswith('.zip'):
+                print(f"[BACKGROUND] Unzipping {file_name} in memory...")
+                
+                # Open the zip file directly from the downloaded bytes
+                with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                    for extracted_name in z.namelist():
+                        s3_key = f"{ticket_id}/{extracted_name}"
+                        print(f"[BACKGROUND] Uploading extracted file to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
+                        
+                        # Upload each extracted file directly to S3
+                        with z.open(extracted_name) as f:
+                            s3_client.upload_fileobj(f, S3_BUCKET_NAME, s3_key)
+                            
+                print(f"[BACKGROUND] SUCCESS! {file_name} extracted and contents vaulted in S3.")
+                
+            else:
+                # Handle non-zip files normally
+                s3_key = f"{ticket_id}/{file_name}"
+                print(f"[BACKGROUND] Uploading to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
+                
+                s3_client.upload_fileobj(io.BytesIO(response.content), S3_BUCKET_NAME, s3_key)
+                print(f"[BACKGROUND] SUCCESS! {file_name} securely vaulted in S3.")
             
         except Exception as e:
             print(f"[BACKGROUND] ERROR processing {file_name}: {str(e)}")
