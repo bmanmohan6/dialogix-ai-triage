@@ -1,6 +1,8 @@
 import re
-import json
 from datetime import datetime, timezone
+from fastapi import FastAPI, BackgroundTasks
+from pydantic import BaseModel
+from typing import List
 
 class PIIRedactor:
     def __init__(self):
@@ -20,13 +22,11 @@ class PIIRedactor:
 class LogProcessor:
     def __init__(self):
         self.redactor = PIIRedactor()
-        # Standard log regex pattern: [TIMESTAMP] [LOG_LEVEL] [SERVICE] Message
         self.log_pattern = r'^\[(?P<timestamp>.*?)\] \[(?P<level>INFO|WARN|ERROR|DEBUG)\] \[(?P<service>.*?)\] (?P<message>.*)$'
 
     def parse_line(self, line):
         match = re.match(self.log_pattern, line.strip())
         if not match:
-            # Fallback for unstructured logs
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": "UNKNOWN",
@@ -35,32 +35,57 @@ class LogProcessor:
             }
 
         data = match.groupdict()
-        # Redact PII from the log message before returning
         data["message"] = self.redactor.redact(data["message"])
         return data
 
-# fastapi and pydantic
-from fastapi import FastAPI
-from pydantic import BaseModel
 
-# ... (Keep your PIIRedactor and LogProcessor classes here) ...
-
-# 1. Initialize the FastAPI application
 app = FastAPI(title="DiaLogix Log Processor API")
+processor = LogProcessor()
 
-# 2. Define the expected incoming JSON structure
+# --- Data Models ---
 class LogRequest(BaseModel):
     raw_log: str
 
-# 3. Instantiate the processor once so it is ready for all requests
-processor = LogProcessor()
+class Attachment(BaseModel):
+    name: str
+    attachment_url: str
 
-# 4. Create the API endpoint
+class TicketInfo(BaseModel):
+    id: int
+    attachments: List[Attachment] = []
+
+class FreshdeskWebhook(BaseModel):
+    ticket: TicketInfo
+
+# --- Background Worker ---
+def process_ticket_attachments(ticket_id: int, attachments: List[Attachment]):
+    # This is our staging area placeholder. 
+    # The actual S3 download and extraction logic will go here.
+    print(f"[BACKGROUND] Starting extraction for Ticket #{ticket_id}")
+    for att in attachments:
+        print(f"[BACKGROUND] Queuing download for {att.name} from {att.attachment_url}")
+
+
+# --- API Endpoints ---
+@app.get("/")
+async def root():
+    return {"status": "healthy", "service": "log-processor"}
+
 @app.post("/parse")
 async def parse_log_endpoint(request: LogRequest):
-    """
-    Receives a raw log line, redacts PII, and returns structured JSON.
-    """
-    # The request.raw_log string is passed to your existing engine
-    parsed_data = processor.parse_line(request.raw_log)
-    return parsed_data
+    return processor.parse_line(request.raw_log)
+
+@app.post("/api/v1/webhooks/freshdesk")
+async def freshdesk_webhook_endpoint(webhook: FreshdeskWebhook, background_tasks: BackgroundTasks):
+    ticket_id = webhook.ticket.id
+    attachments = webhook.ticket.attachments
+    
+    if attachments:
+        # Hand the heavy lifting off to the background worker so we don't freeze the API
+        background_tasks.add_task(process_ticket_attachments, ticket_id, attachments)
+        
+    return {
+        "status": "accepted", 
+        "ticket_id": ticket_id, 
+        "message": f"Webhook received. {len(attachments)} attachments queued for background processing."
+    }
