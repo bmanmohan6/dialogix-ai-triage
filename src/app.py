@@ -13,8 +13,11 @@ class PIIRedactor:
         self.patterns = {
             "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
             "IP_ADDRESS": r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b',
-            "PHONE": r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
-            "SSN": r'\b\d{3}-\d{2}-\d{4}\b'
+            "PHONE": r'\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
+            "SSN": r'\b\d{3}-\d{2}-\d{4}\b',
+            "URL": r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s<>\'"]*)?',
+            "CREDENTIAL": r'(?i)(password|passwd|pwd|secret|token|api_key|apikey)[\s:=*]+([^\s&,;"\'>\\]+)',
+            "USERNAME_ACCOUNT": r'(?i)(user|username|user_name|account|svc_account|login)[\s:=]+([^\s&,;"\'>\\]+)'
         }
 
     def redact(self, log_text):
