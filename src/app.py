@@ -64,9 +64,10 @@ class FreshdeskWebhook(BaseModel):
 # --- Background Worker ---
 s3_client = boto3.client('s3')
 S3_BUCKET_NAME = "dialogix-diagnostics-20260814012619980300000001"
+redactor = PIIRedactor()
 
 def process_ticket_attachments(ticket_id: int, attachments: List[Attachment]):
-    print(f"[BACKGROUND] Starting secure extraction for Ticket #{ticket_id}")
+    print(f"[BACKGROUND] Starting secure extraction and redaction for Ticket #{ticket_id}")
     
     for attachment in attachments:
         file_name = attachment.name
@@ -74,37 +75,56 @@ def process_ticket_attachments(ticket_id: int, attachments: List[Attachment]):
         
         print(f"[BACKGROUND] Downloading {file_name} from Freshdesk...")
         try:
-            # Download the file into memory
             response = requests.get(file_url)
             response.raise_for_status() 
             
-            # Check if the file is a zip archive
             if file_name.endswith('.zip'):
-                print(f"[BACKGROUND] Unzipping {file_name} in memory...")
+                print(f"[BACKGROUND] Unzipping and redacting {file_name} in memory...")
                 
-                # Open the zip file directly from the downloaded bytes
                 with zipfile.ZipFile(io.BytesIO(response.content)) as z:
                     for extracted_name in z.namelist():
-                        s3_key = f"{ticket_id}/{extracted_name}"
-                        print(f"[BACKGROUND] Uploading extracted file to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
-                        
-                        # Upload each extracted file directly to S3
-                        with z.open(extracted_name) as f:
-                            s3_client.upload_fileobj(f, S3_BUCKET_NAME, s3_key)
+                        # Skip directories inside the zip
+                        if extracted_name.endswith('/'):
+                            continue
                             
-                print(f"[BACKGROUND] SUCCESS! {file_name} extracted and contents vaulted in S3.")
+                        s3_key = f"{ticket_id}/{extracted_name}"
+                        print(f"[BACKGROUND] Redacting and uploading: s3://{S3_BUCKET_NAME}/{s3_key} ...")
+                        
+                        with z.open(extracted_name) as f:
+                            try:
+                                # 1. Read bytes and convert to string
+                                raw_text = f.read().decode('utf-8')
+                                
+                                # 2. Scrub the PII
+                                redacted_text = redactor.redact(raw_text)
+                                
+                                # 3. Convert back to bytes for S3
+                                redacted_bytes = redacted_text.encode('utf-8')
+                                s3_client.upload_fileobj(io.BytesIO(redacted_bytes), S3_BUCKET_NAME, s3_key)
+                                
+                            except UnicodeDecodeError:
+                                # If it's not a text file (like an image), just upload raw bytes
+                                f.seek(0)
+                                s3_client.upload_fileobj(f, S3_BUCKET_NAME, s3_key)
+                                
+                print(f"[BACKGROUND] SUCCESS! {file_name} extracted, redacted, and vaulted.")
                 
             else:
-                # Handle non-zip files normally
                 s3_key = f"{ticket_id}/{file_name}"
-                print(f"[BACKGROUND] Uploading to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
+                print(f"[BACKGROUND] Redacting and uploading to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
                 
-                s3_client.upload_fileobj(io.BytesIO(response.content), S3_BUCKET_NAME, s3_key)
-                print(f"[BACKGROUND] SUCCESS! {file_name} securely vaulted in S3.")
+                try:
+                    raw_text = response.content.decode('utf-8')
+                    redacted_text = redactor.redact(raw_text)
+                    redacted_bytes = redacted_text.encode('utf-8')
+                    s3_client.upload_fileobj(io.BytesIO(redacted_bytes), S3_BUCKET_NAME, s3_key)
+                except UnicodeDecodeError:
+                    s3_client.upload_fileobj(io.BytesIO(response.content), S3_BUCKET_NAME, s3_key)
+                    
+                print(f"[BACKGROUND] SUCCESS! {file_name} securely vaulted.")
             
         except Exception as e:
             print(f"[BACKGROUND] ERROR processing {file_name}: {str(e)}")
-
 
 # --- API Endpoints ---
 @app.get("/")
