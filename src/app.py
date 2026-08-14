@@ -1,5 +1,7 @@
 import re
 from datetime import datetime, timezone
+import boto3
+import requests
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from typing import List
@@ -58,12 +60,34 @@ class FreshdeskWebhook(BaseModel):
     ticket: TicketInfo
 
 # --- Background Worker ---
+s3_client = boto3.client('s3')
+S3_BUCKET_NAME = "dialogix-diagnostics-20260814012619980300000001"
+
 def process_ticket_attachments(ticket_id: int, attachments: List[Attachment]):
-    # This is our staging area placeholder. 
-    # The actual S3 download and extraction logic will go here.
-    print(f"[BACKGROUND] Starting extraction for Ticket #{ticket_id}")
-    for att in attachments:
-        print(f"[BACKGROUND] Queuing download for {att.name} from {att.attachment_url}")
+    print(f"[BACKGROUND] Starting secure extraction for Ticket #{ticket_id}")
+    
+    for attachment in attachments:
+        file_name = attachment.name
+        file_url = attachment.attachment_url
+        
+        # Create the virtual folder structure: "ticket_id/filename.ext"
+        s3_key = f"{ticket_id}/{file_name}"
+        
+        print(f"[BACKGROUND] Downloading {file_name} from Freshdesk...")
+        try:
+            # Download the file as a stream so we don't overwhelm the server's RAM
+            response = requests.get(file_url, stream=True)
+            response.raise_for_status() 
+            
+            print(f"[BACKGROUND] Uploading to S3: s3://{S3_BUCKET_NAME}/{s3_key} ...")
+            
+            # Stream the raw file data directly into your AWS S3 bucket
+            s3_client.upload_fileobj(response.raw, S3_BUCKET_NAME, s3_key)
+            
+            print(f"[BACKGROUND] SUCCESS! {file_name} securely vaulted in S3.")
+            
+        except Exception as e:
+            print(f"[BACKGROUND] ERROR processing {file_name}: {str(e)}")
 
 
 # --- API Endpoints ---
